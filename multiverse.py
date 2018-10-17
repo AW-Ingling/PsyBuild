@@ -9,7 +9,7 @@
 # Queues:
 # https://docs.python.org/3.6/library/queue.html#queue.Queue
 #
-# How to override attribute setting (to communicate values to run universe), override setattr
+# How to override attribute setting (to communicate values to run space), override setattr
 # https://docs.python.org/dev/reference/datamodel.html#object.__setattr__
 #
 # How to get a python object by ID
@@ -25,14 +25,15 @@
 # https://stackoverflow.com/questions/11731136/python-class-method-decorator-with-self-arguments
 
 # TO DO:
-# - Rename "universe" to "space"
+# - Transfer calls from design space to run space 
+# - Rename "space" to "space"
 # - Exit processes gracefully.
 # - Write tests
 # - Make the spaces singletons
 # - Create a design side thread to read back response from the run side.
 # - Replace pipes with queues because we can not peek pipes.
 # - Use decorators maximally.  Try using decorator wrappers to subclass.
-# - Consider intercepting all object calls and auto translating to run universe command by substituting our obj. refs
+# - Consider intercepting all object calls and auto translating to run space command by substituting our obj. refs
 # - Implement a debug mode where all object execute in the same process?
 # - Bundle commands so that client is always in a legal and matching state per frame
 
@@ -48,10 +49,10 @@ from collections import namedtuple
 from multiprocessing import Process, Pipe
 
 
-DESIGN_UNIVERSE = 0
-RUN_UNIVERSE = 1
+DESIGN_SPACE = 0
+RUN_SPACE = 1
 
-universe_global = None
+space_global = None
 
 EXIT_IPC_COMMAND = 0
 EVAL_IPC_COMMAND = 1
@@ -84,17 +85,17 @@ def make_twinbase_message(a_twinbase):
     return message
 
 
-def is_run_universe():
-    assert universe_global, "Attempt to detect the universe type before the universe has been created."
-    return type(universe_global) is RunUniverse
+def is_run_space():
+    assert space_global, "Attempt to detect the space type before the space has been created."
+    return type(space_global) is RunSpace
 
 
-def is_design_universe():
-    assert universe_global, "Attempt to detect the universe type before the universe has been created."
-    return type(universe_global) is DesignUniverse
+def is_design_space():
+    assert space_global, "Attempt to detect the space type before the space has been created."
+    return type(space_global) is DesignSpace
 
 
-class RunUniverse:
+class RunSpace:
 
     def __init__(self, pipe_connector):
         self.pipe_connector = pipe_connector
@@ -115,38 +116,38 @@ class RunUniverse:
                 elif command == CREATE_TWINBASE_IPC_COMMAND:
                     twinbase_class = globals()[payload.class_name]
                     self.design_id_to_obj_table[payload.id] = twinbase_class()
-                    #todo:reply here with the id of the new object for the inverse table in design universe
+                    #todo:reply here with the id of the new object for the inverse table in design space
                 elif command == INVENTORY_IPC_COMMAND:
                     for key, value in self.design_id_to_obj_table.items():
                         print("key: %s, object: %s" % (key, value))
                 else:
-                    assert False, "Unknown command received from design universe."
+                    assert False, "Unknown command received from design space."
             time.sleep(PROXY_FRAME_DELAY_SECS)
 
 
-def start_run_universe(pipe_connector):
-    global universe_global
-    universe_global = RunUniverse(pipe_connector)
-    universe_global.start_read_eval_loop()
+def start_run_space(pipe_connector):
+    global space_global
+    space_global = RunSpace(pipe_connector)
+    space_global.start_read_eval_loop()
 
 
-class DesignUniverse:
+class DesignSpace:
 
     def __init__(self):
         # anchor ourselves by a top level variable reference to prevent garbage collection
-        global universe_global
-        universe_global = self
+        global space_global
+        space_global = self
         # init state
         self.design_connector = None
         self.run_connector = None
-        self.run_universe_process = None
-        # Launch the run universe
-        self.start_run_universe();
+        self.run_space_process = None
+        # Launch the run space
+        self.start_run_space();
 
-    def start_run_universe(self):
+    def start_run_space(self):
         self.design_connector, self.run_connector = Pipe()
-        self.run_universe_process = Process(target=start_run_universe, args=(self.run_connector,))
-        self.run_universe_process.start()
+        self.run_space_process = Process(target=start_run_space, args=(self.run_connector,))
+        self.run_space_process.start()
 
     def send_command(self, command, payload=None):
         message = pack_message(command, payload)
@@ -159,10 +160,10 @@ class DesignUniverse:
         message = make_twinbase_message(a_twinbase)
         self.design_connector.send(message)
 
-    def inventory_design_universe(self):
+    def inventory_design_space(self):
         pass
 
-    def inventory_run_universe(self):
+    def inventory_run_space(self):
         self.send_command(INVENTORY_IPC_COMMAND)
 
 
@@ -170,11 +171,11 @@ class DesignUniverse:
 class TwinBase:
 
     def __init__(self):
-        assert universe_global, "Attempt to instantiate a TwinBase kind without the design space portal."
-        if is_design_universe():
-            # instantiate a matched instance of ourselves in the runtime universe
-            universe_global.create_runtime_twinbase(self)
-            #TODO: receive twin ID from runtime universe and store it in the universe object table.
+        assert space_global, "Attempt to instantiate a TwinBase kind without the design space portal."
+        if is_design_space():
+            # instantiate a matched instance of ourselves in the runtime space
+            space_global.create_runtime_twinbase(self)
+            #TODO: receive twin ID from runtime space and store it in the space object table.
 
 
 
