@@ -23,10 +23,17 @@
 #
 # How to write method decorators
 # https://stackoverflow.com/questions/11731136/python-class-method-decorator-with-self-arguments
+#
+# Sample code for fetching leaf nodes
+# https://stackoverflow.com/questions/21004181/how-to-get-leaf-nodes-of-a-tree-using-python
+#
+# Getting the class name from method decorators
+# https://www.thecodeship.com/patterns/guide-to-python-function-decorators/
+# https://stackoverflow.com/questions/2366713/can-a-python-decorator-of-an-instance-method-access-the-class
+# https://stackoverflow.com/questions/306130/python-decorator-makes-function-forget-that-it-belongs-to-a-class
 
 # TO DO:
 # - Transfer calls from design space to run space 
-# - Rename "space" to "space"
 # - Exit processes gracefully.
 # - Write tests
 # - Make the spaces singletons
@@ -36,6 +43,7 @@
 # - Consider intercepting all object calls and auto translating to run space command by substituting our obj. refs
 # - Implement a debug mode where all object execute in the same process?
 # - Bundle commands so that client is always in a legal and matching state per frame
+
 
 # CONSIDERATIONS:
 #
@@ -58,12 +66,15 @@ EXIT_IPC_COMMAND = 0
 EVAL_IPC_COMMAND = 1
 MESSAGE_IPC_COMMAND = 2
 CREATE_TWINBASE_IPC_COMMAND = 3
-INVENTORY_IPC_COMMAND = 4
+TWINBASE_INVOCATION = 4
+INVENTORY_IPC_COMMAND = 5
 
 PROXY_FRAME_DELAY_SECS = 1/60
 
 TwinBaseDescriptor = namedtuple('TwinBaseDescriptor', 'class_name id')
 PackedMessage = namedtuple('PackedMessage', 'command, payload')
+InvocationPayload = namedtuple('InvocationPayload', 'target method_name args')
+
 
 def pack_message(command, payload=None):
     return PackedMessage(command, payload)
@@ -73,15 +84,14 @@ def unpack_message(message):
     return message.command, message.payload
 
 
-def make_twinbase_descriptor(a_twinbase):
-    assert issubclass(type(a_twinbase), TwinBase)
-    descriptor = TwinBaseDescriptor(type(a_twinbase).__name__, id(a_twinbase))
-    return descriptor
-
-
 def make_twinbase_message(a_twinbase):
-    payload =  make_twinbase_descriptor(a_twinbase)
-    message = pack_message(CREATE_TWINBASE_IPC_COMMAND, payload)
+    message = pack_message(CREATE_TWINBASE_IPC_COMMAND, a_twinbase.descriptor)
+    return message
+
+
+def make_twinbase_invocation(twinbase_descriptor, method_name, subbed_args):
+    payload = InvocationPayload(twinbase_descriptor, method_name, subbed_args)
+    message = pack_message(TWINBASE_INVOCATION, payload)
     return message
 
 
@@ -156,7 +166,7 @@ class DesignSpace:
     # def send_message(self, message):
     #     self.design_connector.send(message)
 
-    def create_runtime_twinbase(self, a_twinbase):
+    def create_runtime_twin(self, a_twinbase):
         message = make_twinbase_message(a_twinbase)
         self.design_connector.send(message)
 
@@ -167,6 +177,27 @@ class DesignSpace:
         self.send_command(INVENTORY_IPC_COMMAND)
 
 
+# todo: We don't need the class because it already is referenced by ID in the runspace, so just clean this up.
+def twin_method(twinbase_method):
+    #todo: the 0th argument is the function name, so this is probalby a bug
+    def wrapper(*argv):
+        # convert objects to references and send an invocation to the runtime.
+        converted_args = [arg.descriptor if issubclass(type(arg, TwinBase)) else arg for arg in argv]
+        invocation = make_twinbase_invocation(argv[0], twinbase_method.__name__, converted_args)
+
+        return twinbase_method(*argv)
+    return wrapper
+
+
+# class Client(object):
+#     def __init__(self, url):
+#         self.url = url
+#
+#     @check_authorization
+#     def get(self):
+#         print 'get'
+
+
 
 class TwinBase:
 
@@ -174,9 +205,13 @@ class TwinBase:
         assert space_global, "Attempt to instantiate a TwinBase kind without the design space portal."
         if is_design_space():
             # instantiate a matched instance of ourselves in the runtime space
-            space_global.create_runtime_twinbase(self)
+            space_global.create_runtime_twin(self)
             #TODO: receive twin ID from runtime space and store it in the space object table.
 
+    @property
+    def descriptor(self):
+        descriptor = TwinBaseDescriptor(type(self).__name__, id(self))
+        return descriptor
 
 
 
