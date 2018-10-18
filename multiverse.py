@@ -31,6 +31,15 @@
 # https://www.thecodeship.com/patterns/guide-to-python-function-decorators/
 # https://stackoverflow.com/questions/2366713/can-a-python-decorator-of-an-instance-method-access-the-class
 # https://stackoverflow.com/questions/306130/python-decorator-makes-function-forget-that-it-belongs-to-a-class
+#
+# How to find class of named tuple
+# https://stackoverflow.com/questions/2166818/python-how-to-check-if-an-object-is-an-instance-of-a-namedtuple
+#
+# How to test if an object is pickleable:
+# https://stackoverflow.com/questions/17872056/how-to-check-if-an-object-is-pickleable
+#
+# Python RPC:
+# https://rpyc.readthedocs.io/en/latest/tutorial/tut3.html
 
 # TO DO:
 # - Transfer calls from design space to run space 
@@ -43,6 +52,9 @@
 # - Consider intercepting all object calls and auto translating to run space command by substituting our obj. refs
 # - Implement a debug mode where all object execute in the same process?
 # - Bundle commands so that client is always in a legal and matching state per frame
+# - Test of pickleability when packing and unpacking inovocations
+# - Look at an RPC library
+# - Look at just using "eval"
 
 
 # CONSIDERATIONS:
@@ -65,15 +77,16 @@ space_global = None
 EXIT_IPC_COMMAND = 0
 EVAL_IPC_COMMAND = 1
 MESSAGE_IPC_COMMAND = 2
-CREATE_TWINBASE_IPC_COMMAND = 3
-TWINBASE_INVOCATION = 4
+INSTANTIATION_IPC_COMMAND = 3
+INVOCATION_IPC_COMMAND = 4
 INVENTORY_IPC_COMMAND = 5
 
 PROXY_FRAME_DELAY_SECS = 1/60
 
-TwinBaseDescriptor = namedtuple('TwinBaseDescriptor', 'class_name id')
 PackedMessage = namedtuple('PackedMessage', 'command, payload')
-InvocationPayload = namedtuple('InvocationPayload', 'target method_name args')
+InvocationPayload = namedtuple('InvocationPayload', 'id method_name args')
+InstantiationPayload = namedtuple('InstantiationPayload', 'class_name id')
+IDArg = namedtuple('IDArg', 'id')
 
 
 def pack_message(command, payload=None):
@@ -83,22 +96,20 @@ def pack_message(command, payload=None):
 def unpack_message(message):
     return message.command, message.payload
 
-
-def make_twinbase_message(a_twinbase):
-    message = pack_message(CREATE_TWINBASE_IPC_COMMAND, a_twinbase.descriptor)
+def make_create_twin_message(a_twinbase):
+    message = pack_message(INSTANTIATION_IPC_COMMAND, a_twinbase.instantiation_descriptor)
     return message
 
-
-def make_twinbase_invocation(twinbase_descriptor, method_name, subbed_args):
-    payload = InvocationPayload(twinbase_descriptor, method_name, subbed_args)
-    message = pack_message(TWINBASE_INVOCATION, payload)
+def make_invocation_message(payload):
+    message = pack_message(INVOCATION_IPC_COMMAND, payload)
     return message
 
+def is_twin_arg(an_arg):
+    isinstance(an_arg, IDArg)
 
 def is_run_space():
     assert space_global, "Attempt to detect the space type before the space has been created."
     return type(space_global) is RunSpace
-
 
 def is_design_space():
     assert space_global, "Attempt to detect the space type before the space has been created."
@@ -109,7 +120,7 @@ class RunSpace:
 
     def __init__(self, pipe_connector):
         self.pipe_connector = pipe_connector
-        self.design_id_to_obj_table = dict()
+        self.id_to_obj_table = dict()
         self.run_read_loop = True
 
     def start_read_eval_loop(self):
@@ -123,13 +134,16 @@ class RunSpace:
                     print("message: " + str(payload))
                 elif command == EVAL_IPC_COMMAND:
                     print("EVAL_IPC_COMMAND unimplemented")
-                elif command == CREATE_TWINBASE_IPC_COMMAND:
+                elif command == INSTANTIATION_IPC_COMMAND:
                     twinbase_class = globals()[payload.class_name]
-                    self.design_id_to_obj_table[payload.id] = twinbase_class()
+                    self.id_to_obj_table[payload.id] = twinbase_class()
                     #todo:reply here with the id of the new object for the inverse table in design space
                 elif command == INVENTORY_IPC_COMMAND:
-                    for key, value in self.design_id_to_obj_table.items():
+                    for key, value in self.id_to_obj_table.items():
                         print("key: %s, object: %s" % (key, value))
+                elif command == INVOCATION_IPC_COMMAND:
+                    object, bound_method, args = unpack_invocation_payload(payload)
+                    apply_unpacked_invocation(bound_method, args)
                 else:
                     assert False, "Unknown command received from design space."
             time.sleep(PROXY_FRAME_DELAY_SECS)
@@ -162,12 +176,12 @@ class DesignSpace:
     def send_command(self, command, payload=None):
         message = pack_message(command, payload)
         self.design_connector.send(message)
-    #
-    # def send_message(self, message):
-    #     self.design_connector.send(message)
+
+    def send_message(self, message):
+        self.design_connector.send(message)
 
     def create_runtime_twin(self, a_twinbase):
-        message = make_twinbase_message(a_twinbase)
+        message = make_create_twin_message(a_twinbase)
         self.design_connector.send(message)
 
     def inventory_design_space(self):
@@ -177,26 +191,40 @@ class DesignSpace:
         self.send_command(INVENTORY_IPC_COMMAND)
 
 
-# todo: We don't need the class because it already is referenced by ID in the runspace, so just clean this up.
-def twin_method(twinbase_method):
-    #todo: the 0th argument is the function name, so this is probalby a bug
-    def wrapper(*argv):
-        # convert objects to references and send an invocation to the runtime.
-        converted_args = [arg.descriptor if issubclass(type(arg, TwinBase)) else arg for arg in argv]
-        invocation = make_twinbase_invocation(argv[0], twinbase_method.__name__, converted_args)
+def pack_invocation_payload(method, args):
+    # Find instances of TwinBase in the argument list and convert them to invocation descriptors
+    converted_args = [arg.invocation_descriptor if issubclass(type(arg), TwinBase) else arg for arg in args]
+    # Pack the id of the object, the invoked method and the converted args to a named tuple
+    payload = InvocationPayload(id(args[0]), method.__name__, converted_args)
+    return payload
 
+
+def unpack_invocation_payload(payload):
+    # Get the invoked object for its received ID
+    object = space_global.id_to_obj_table[payload.id]
+    # Get the object method reference by name inside the invocation object
+    bound_method = getattr(object, payload.method_name)
+    # Find and unpack any twin references inside the argument list
+    args = [space_global.id_to_obj_table[arg.id] if isinstance(arg, IDArg) else arg for arg in payload.args]
+    return object, bound_method, args
+
+
+def apply_unpacked_invocation(bound_method, args):
+    return bound_method(*args[1:])
+
+
+# todo: use decorator decorators here
+def twin_method(twinbase_method):
+    def wrapper(*argv):
+        if is_design_space():
+            # convert objects to references
+            invocation_payload = pack_invocation_payload(twinbase_method, argv)
+            invocation_method = make_invocation_message(invocation_payload)
+            # transmist the invocation to the twin in run space
+            space_global.send_message(invocation_method)
+        # invoke the decorated method in design space or run space
         return twinbase_method(*argv)
     return wrapper
-
-
-# class Client(object):
-#     def __init__(self, url):
-#         self.url = url
-#
-#     @check_authorization
-#     def get(self):
-#         print 'get'
-
 
 
 class TwinBase:
@@ -209,12 +237,19 @@ class TwinBase:
             #TODO: receive twin ID from runtime space and store it in the space object table.
 
     @property
-    def descriptor(self):
-        descriptor = TwinBaseDescriptor(type(self).__name__, id(self))
+    def instantiation_descriptor(self):
+        descriptor = InstantiationPayload(type(self).__name__, id(self))
         return descriptor
 
+    @property
+    def invocation_descriptor(self):
+        descriptor = IDArg(id(self))
+        return descriptor
 
-
+    @twin_method
+    def print_test(self, print_value_1, print_value_2):
+        print("print_value_1: %s" % str(print_value_1))
+        print("print_value_2: %s" % str(print_value_2))
 
 
 
