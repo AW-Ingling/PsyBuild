@@ -42,6 +42,8 @@
 # https://rpyc.readthedocs.io/en/latest/tutorial/tut3.html
 
 # TO DO:
+# - Enable inverse calls
+# - Create synchronous calls which return results between spaces.
 # - Transfer calls from design space to run space 
 # - Exit processes gracefully.
 # - Write tests
@@ -55,6 +57,9 @@
 # - Test of pickleability when packing and unpacking inovocations
 # - Look at an RPC library
 # - Look at just using "eval"
+# - Write a test module
+# - Include named arguments
+
 
 
 # CONSIDERATIONS:
@@ -68,9 +73,10 @@ import time
 from collections import namedtuple
 from multiprocessing import Process, Pipe
 
+start_time_secs_global = time.time()
 
-DESIGN_SPACE = 0
-RUN_SPACE = 1
+DESIGN_SPACE = 1
+RUN_SPACE = 2
 
 space_global = None
 
@@ -96,24 +102,50 @@ def pack_message(command, payload=None):
 def unpack_message(message):
     return message.command, message.payload
 
+
 def make_create_twin_message(a_twinbase):
     message = pack_message(INSTANTIATION_IPC_COMMAND, a_twinbase.instantiation_descriptor)
     return message
+
 
 def make_invocation_message(payload):
     message = pack_message(INVOCATION_IPC_COMMAND, payload)
     return message
 
+
 def is_twin_arg(an_arg):
     isinstance(an_arg, IDArg)
+
 
 def is_run_space():
     assert space_global, "Attempt to detect the space type before the space has been created."
     return type(space_global) is RunSpace
 
+
 def is_design_space():
     assert space_global, "Attempt to detect the space type before the space has been created."
     return type(space_global) is DesignSpace
+
+
+def space_constant_name():
+    if type(space_global) is RunSpace:
+        return "RUN_SPACE"
+    elif type(space_global) is DesignSpace:
+        return "DESIGN_SPACE"
+    else:
+        return None
+
+
+def space_informal_name():
+    if type(space_global) is RunSpace:
+        return "RS"
+    elif type(space_global) is DesignSpace:
+        return "DS"
+    else:
+        return None
+
+def secs():
+    return time.time() - start_time_secs_global
 
 
 class RunSpace:
@@ -213,17 +245,38 @@ def apply_unpacked_invocation(bound_method, args):
     return bound_method(*args[1:])
 
 
-# todo: use decorator decorators here
-def twin_method(twinbase_method):
+def both_twin(twinbase_method):
+    def wrapper(*argv):
+        # invoke the decorated method in design space or run space
+        local_result= twinbase_method(*argv)
+        # conditionally invoke the run space instance remotely
+        if is_design_space():
+             # convert objects to references
+             invocation_payload = pack_invocation_payload(twinbase_method, argv)
+             invocation_method = make_invocation_message(invocation_payload)
+             # transmist the invocation to the twin in run space
+             space_global.send_message(invocation_method)
+        return local_result
+    return wrapper
+
+
+def design_twin(twinbase_method):
+    def wrapper(*argv):
+        return twinbase_method(*argv)
+    return wrapper
+
+
+def run_twin(twinbase_method):
     def wrapper(*argv):
         if is_design_space():
             # convert objects to references
             invocation_payload = pack_invocation_payload(twinbase_method, argv)
             invocation_method = make_invocation_message(invocation_payload)
-            # transmist the invocation to the twin in run space
+            # transmit the invocation to the twin in run space
             space_global.send_message(invocation_method)
-        # invoke the decorated method in design space or run space
-        return twinbase_method(*argv)
+        # invoke the decorated method only in run space
+        if is_run_space():
+            return twinbase_method(*argv)
     return wrapper
 
 
@@ -246,10 +299,21 @@ class TwinBase:
         descriptor = IDArg(id(self))
         return descriptor
 
-    @twin_method
-    def print_test(self, print_value_1, print_value_2):
-        print("print_value_1: %s" % str(print_value_1))
-        print("print_value_2: %s" % str(print_value_2))
+    def _echo(self, *argv):
+        for index, arg in enumerate(argv):
+            print("%s %s echo: %s, %s" % (str(secs()), str(space_informal_name()), str(index), str(arg)))
+
+    @both_twin
+    def echo(self, *argv):
+        self._echo(*argv)
+
+    @design_twin
+    def echo_design(self, *argv):
+        self._echo(*argv)
+
+    @run_twin
+    def echo_run(self, *argv):
+        self._echo(*argv)
 
 
 
